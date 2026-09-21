@@ -4,7 +4,11 @@
 .iml
 
 ### Spring Boot local configuration ###
-/src/main/resources/application.properties
+/spring-boot-ingestion/src/main/resources/application.properties
 
 .env
-data/errors
+data/errors/
+data/split/
+
+### maven build output###
+target/
