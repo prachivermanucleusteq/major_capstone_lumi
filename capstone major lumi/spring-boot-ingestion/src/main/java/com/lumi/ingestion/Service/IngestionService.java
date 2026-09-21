@@ -44,9 +44,9 @@ public class IngestionService {
     public IngestionService(
             AirflowClient airflowClient,
             @Value("${airflow.dag-id}") String dagId,
-            @Value("${pipeline.jdbc-url}") String jdbcUrl,
-            @Value("${pipeline.jdbc-username}") String jdbcUsername,
-            @Value("${pipeline.jdbc-password}") String jdbcPassword,
+            @Value("${spring.datasource.url}") String jdbcUrl,
+            @Value("${spring.datasource.username}") String jdbcUsername,
+            @Value("${spring.datasource.password}") String jdbcPassword,
             @Value("${file.error-output-base}") String errorOutputBase,
             @Value("${file.split-threshold-kb}") long splitThresholdKb,
             @Value("${file.split-output-base}") String splitOutputBase,
