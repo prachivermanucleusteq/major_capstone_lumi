@@ -29,10 +29,13 @@ public class EmployeeRecordRepository {
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
+    private final SensitiveDataDecryptor sensitiveDataDecryptor;
 
-    public EmployeeRecordRepository(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
+    public EmployeeRecordRepository(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper,
+                                   SensitiveDataDecryptor sensitiveDataDecryptor) {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
+        this.sensitiveDataDecryptor = sensitiveDataDecryptor;
     }
 
     public List<EmployeeRecordResponse> findAll() {
@@ -46,7 +49,14 @@ public class EmployeeRecordRepository {
 
     private EmployeeRecordResponse mapRecord(ResultSet resultSet, int rowNumber) throws SQLException {
         try {
-            Map<String, Object> emergency = readObject(resultSet.getString("emergency_contact"));
+            String encryptedEmergencyJson=resultSet.getString("emergency_contact");
+            Map<String, Object> emergency = readObject(encryptedEmergencyJson);
+            if (emergency !=null){
+                String encryptedEmergencyPhone= text(emergency, "phone");
+                if (encryptedEmergencyPhone !=null && !encryptedEmergencyPhone.isBlank()){
+                    emergency.put("phone", sensitiveDataDecryptor.decrypt(encryptedEmergencyPhone));
+                }
+            }
             Array skillsArray = resultSet.getArray("skills");
             List<String> skills = skillsArray == null ? List.of() : Arrays.asList((String[]) skillsArray.getArray());
             return new EmployeeRecordResponse(
@@ -54,7 +64,7 @@ public class EmployeeRecordRepository {
                     resultSet.getString("first_name"),
                     resultSet.getString("last_name"),
                     resultSet.getString("email"),
-                    SensitiveDataDecryptor.decrypt(resultSet.getString("phone_number")),
+                    sensitiveDataDecryptor.decrypt(resultSet.getString("phone_number")),
                     resultSet.getObject("hire_date", java.time.LocalDate.class),
                     resultSet.getString("department"),
                     resultSet.getString("job_title"),
@@ -66,7 +76,7 @@ public class EmployeeRecordRepository {
                     skills,
                     readObject(resultSet.getString("address")),
                     new EmployeeRecordResponse.EmergencyContact(text(emergency, "name"), text(emergency, "relationship"),
-                            SensitiveDataDecryptor.decrypt(text(emergency, "phone")),
+                            sensitiveDataDecryptor.decrypt(text(emergency, "phone")),
                             text(emergency, "email")),
                     resultSet.getTimestamp("ingestion_timestamp").toInstant(),
                     resultSet.getString("execution_id"),
@@ -79,7 +89,7 @@ public class EmployeeRecordRepository {
     }
 
     private BigDecimal decryptSalary(String encryptedSalary) {
-        String salary = SensitiveDataDecryptor.decrypt(encryptedSalary);
+        String salary = sensitiveDataDecryptor.decrypt(encryptedSalary);
         return salary == null || salary.isBlank() ? null : new BigDecimal(salary);
     }
 

@@ -70,4 +70,19 @@ public class GlobalExceptionHandler {
         );
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
     }
+
+    @ExceptionHandler(InputFileNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleInputFileNotFound(InputFileNotFoundException ex, HttpServletRequest request) {
+        LOG.error("Unexpected application error: path={}", request.getRequestURI(), ex);
+        ErrorResponse response = new ErrorResponse(
+                Instant.now(),
+                HttpStatus.NOT_FOUND.value(),
+                "Input File Not Found",
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
+    }
+
+
 }
