@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS employee (
+    employee_id              UUID            PRIMARY KEY,
+    first_name               VARCHAR(15)     CHECK (char_length(first_name) BETWEEN 3 AND 15),
+    last_name                VARCHAR(15)     CHECK (char_length(last_name) BETWEEN 0 AND 15),
+    email                    VARCHAR(30)     CHECK (char_length(email) BETWEEN 13 AND 30),
+    phone_number             TEXT,
+    hire_date                DATE,
+    department               VARCHAR(20),
+    job_title                VARCHAR(30),
+    salary                   TEXT,
+    currency                 CHAR(3)         CHECK (char_length(currency) = 3),
+    employment_status        VARCHAR(13)     CHECK (char_length(employment_status) BETWEEN 3 AND 13),
+    manager_id               UUID,
+    is_active                BOOLEAN,
+    skills                   TEXT[],
+    address                  JSONB,
+    emergency_contact        TEXT,
+    ingestion_timestamp      TIMESTAMPTZ,
+    execution_id             UUID,
+    source_creation_time     TIMESTAMPTZ
+);

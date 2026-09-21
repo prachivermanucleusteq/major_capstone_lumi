@@ -1,0 +1,56 @@
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: lumi-postgres
+    environment:
+      POSTGRES_DB: lumi
+      POSTGRES_USER: lumi_user
+      POSTGRES_PASSWORD: lumi_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lumi_user -d lumi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  airflow:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    container_name: airflow
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://lumi_user:lumi_password@postgres:5432/lumi
+      AIRFLOW__CORE__LOAD_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__FAB__AUTH_BACKENDS: "airflow.providers.fab.auth_manager.api.auth.backend.basic_auth"
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.providers.fab.auth_manager.api.auth.backend.basic_auth"
+      LUMI_ENCRYPTION_KEY: ${LUMI_ENCRYPTION_KEY}
+    command: >
+      bash -c "
+      airflow db migrate &&
+      (airflow users create --username airflow --password airflow
+      --firstname admin --lastname user --role Admin --email admin@gmail.com
+      || airflow users reset-password --username airflow --password airflow) &&
+      exec airflow standalone
+      "
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - ./data:/opt/lumi/data
+      - ./beam-pipeline/target:/opt/lumi/beam:ro
+      - ./pyspark:/opt/lumi/pyspark:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

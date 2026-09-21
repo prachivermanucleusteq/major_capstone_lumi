@@ -1,0 +1,10 @@
+
+### Intellij Idea ###
+.idea/
+.iml
+
+### Spring Boot local configuration ###
+/src/main/resources/application.properties
+
+.env
+data/errors
