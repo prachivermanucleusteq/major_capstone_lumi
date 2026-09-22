@@ -16,3 +16,5 @@ target/
 ### Python cache ###
 __pycache__/
 *.pyc
+
+dependency-reduced-pom.xml
