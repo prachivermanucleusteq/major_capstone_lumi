@@ -12,3 +12,7 @@ data/split/
 
 ### maven build output###
 target/
+
+### Python cache ###
+__pycache__/
+*.pyc
