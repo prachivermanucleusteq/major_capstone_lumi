@@ -49,38 +49,64 @@ public class EmployeeRecordRepository {
 
     private EmployeeRecordResponse mapRecord(ResultSet resultSet, int rowNumber) throws SQLException {
         try {
-            String encryptedEmergencyJson=resultSet.getString("emergency_contact");
-            Map<String, Object> emergency = readObject(encryptedEmergencyJson);
-            if (emergency !=null){
-                String encryptedEmergencyPhone= text(emergency, "phone");
-                if (encryptedEmergencyPhone !=null && !encryptedEmergencyPhone.isBlank()){
+            String encryptedEmergencyJson = resultSet.getString("emergency_contact");
+            Map<String, Object> emergency = null;
+            if (encryptedEmergencyJson != null && !encryptedEmergencyJson.isBlank()) {
+                emergency = readObject(encryptedEmergencyJson);
+            }
+            if (emergency != null) {
+                String encryptedEmergencyPhone = text(emergency, "phone");
+                if (encryptedEmergencyPhone != null && !encryptedEmergencyPhone.isBlank()) {
                     emergency.put("phone", sensitiveDataDecryptor.decrypt(encryptedEmergencyPhone));
                 }
             }
+
             Array skillsArray = resultSet.getArray("skills");
-            List<String> skills = skillsArray == null ? List.of() : Arrays.asList((String[]) skillsArray.getArray());
+            List<String> skills = (skillsArray == null)
+                    ? List.of()
+                    : Arrays.asList((String[]) skillsArray.getArray());
+
+            String phoneNumber = resultSet.getString("phone_number");
+            String decryptedPhoneNumber = (phoneNumber == null || phoneNumber.isBlank())
+                    ? null
+                    : sensitiveDataDecryptor.decrypt(phoneNumber);
+
+            String salaryValue = resultSet.getString("salary");
+            BigDecimal decodedSalary = decryptSalary(salaryValue);
+
+            String addressJson = resultSet.getString("address");
+            Map<String, Object> address = (addressJson == null || addressJson.isBlank())
+                    ? null
+                    : readObject(addressJson);
+
+            java.sql.Timestamp ingestionTimestamp = resultSet.getTimestamp("ingestion_timestamp");
+            java.sql.Timestamp sourceCreationTimestamp = resultSet.getTimestamp("source_creation_time");
+
             return new EmployeeRecordResponse(
                     resultSet.getObject("employee_id", UUID.class),
                     resultSet.getString("first_name"),
                     resultSet.getString("last_name"),
                     resultSet.getString("email"),
-                    sensitiveDataDecryptor.decrypt(resultSet.getString("phone_number")),
+                    decryptedPhoneNumber,
                     resultSet.getObject("hire_date", java.time.LocalDate.class),
                     resultSet.getString("department"),
                     resultSet.getString("job_title"),
-                    decryptSalary(resultSet.getString("salary")),
+                    decodedSalary,
                     resultSet.getString("currency"),
                     resultSet.getString("employment_status"),
                     resultSet.getString("manager_id"),
                     resultSet.getBoolean("is_active"),
                     skills,
-                    readObject(resultSet.getString("address")),
-                    new EmployeeRecordResponse.EmergencyContact(text(emergency, "name"), text(emergency, "relationship"),
-                            sensitiveDataDecryptor.decrypt(text(emergency, "phone")),
-                            text(emergency, "email")),
-                    resultSet.getTimestamp("ingestion_timestamp").toInstant(),
+                    address,
+                    new EmployeeRecordResponse.EmergencyContact(
+                            text(emergency, "name"),
+                            text(emergency, "relationship"),
+                            (emergency == null) ? null : text(emergency, "phone"),
+                            text(emergency, "email")
+                    ),
+                    ingestionTimestamp == null ? null : ingestionTimestamp.toInstant(),
                     resultSet.getString("execution_id"),
-                    resultSet.getTimestamp("source_creation_time").toInstant()
+                    sourceCreationTimestamp == null ? null : sourceCreationTimestamp.toInstant()
             );
 
         } catch (Exception exception) {
@@ -89,6 +115,9 @@ public class EmployeeRecordRepository {
     }
 
     private BigDecimal decryptSalary(String encryptedSalary) {
+        if (encryptedSalary == null || encryptedSalary.isBlank()) {
+            return null;
+        }
         String salary = sensitiveDataDecryptor.decrypt(encryptedSalary);
         return salary == null || salary.isBlank() ? null : new BigDecimal(salary);
     }
