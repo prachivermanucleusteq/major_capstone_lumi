@@ -11,20 +11,21 @@ import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.io.jdbc.JdbcIO;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.Flatten;
+import org.apache.beam.sdk.transforms.Filter;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.PCollectionTuple;
+import org.apache.beam.sdk.values.TypeDescriptors;
 import org.apache.beam.sdk.values.TupleTagList;
-import org.apache.beam.vendor.grpc.v1p60p1.com.google.api.client.json.Json;
 import org.postgresql.util.PGobject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -33,8 +34,6 @@ import java.sql.Date;
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.sql.Types;
-import java.util.ArrayList;
-import java.util.List;
 
 public class IngestionPipeline {
 
@@ -67,21 +66,23 @@ public class IngestionPipeline {
         PCollection<ErrorRecord>    parseErrors;
 
         if (isCsv) {
-            // Read CSV: first line is the header; subsequent lines are data rows.
-            List<String> lines = Files.readAllLines(Paths.get(inputFile));
-            if (lines.isEmpty()) {
-                throw new IllegalArgumentException("CSV file is empty: " + inputFile);
+            String header;
+            try (BufferedReader reader = Files.newBufferedReader(Paths.get(inputFile))) {
+                header = reader.readLine();
             }
-            String header = lines.get(0);
-            List<String> rows = new ArrayList<>();
-            for (int i = 1; i < lines.size(); i++) {
-                String row = lines.get(i);
-                if (!row.isBlank()) {
-                    rows.add(header + "\t" + row);
-                }
+            if (header == null || header.isBlank()) {
+                throw new IllegalArgumentException("CSV file is empty or has no header: " + inputFile);
             }
-            PCollectionTuple parsed = pipeline
-                    .apply("CreateCsvRows", Create.of(rows))
+
+            PCollection<String> rows = pipeline
+                    .apply("ReadCsvRows", TextIO.read()
+                            .from(inputFile)
+                            .withSkipHeaderLines(1))
+                    .apply("RemoveBlankCsvRows", Filter.by(row -> !row.isBlank()))
+                    .apply("PrefixCsvHeader", MapElements.into(TypeDescriptors.strings())
+                            .via(row -> header + "\t" + row));
+
+                PCollectionTuple parsed = rows
                     .apply("ParseCsv", ParDo
                             .of(new CsvParser(executionId, inputFile))
                             .withOutputTags(CsvParser.VALID_TAG,
@@ -89,10 +90,10 @@ public class IngestionPipeline {
             parsedValid = parsed.get(CsvParser.VALID_TAG);
             parseErrors = parsed.get(CsvParser.ERROR_TAG);
         } else {
-            // JSON: read the entire file as a single string (array or object).
-            String rawJson = new String(Files.readAllBytes(Paths.get(inputFile)));
+            // JSON input must be newline-delimited: one employee object per line.
             PCollectionTuple parsed = pipeline
-                    .apply("CreateInput", Create.of(rawJson))
+                .apply("ReadJsonLines", TextIO.read().from(inputFile))
+                .apply("RemoveBlankJsonLines", Filter.by(line -> !line.isBlank()))
                     .apply("ParseEmployee", ParDo
                             .of(new JsonParser (executionId, inputFile))
                             .withOutputTags(JsonParser.VALID_TAG,

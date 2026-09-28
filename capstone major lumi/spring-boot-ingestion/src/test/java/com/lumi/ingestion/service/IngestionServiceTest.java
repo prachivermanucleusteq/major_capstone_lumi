@@ -122,6 +122,7 @@ class IngestionServiceTest {
        Map<String, String> conf = confCaptor.getValue();
     assertTrue(conf.containsKey("input_directory"));
     assertTrue(conf.containsKey("file_format"));
+    assertEquals("1", conf.get("expected_record_count"));
        assertTrue(conf.containsKey("execution_id"));
        assertTrue(conf.containsKey("jdbc_url"));
        assertTrue(conf.containsKey("jdbc_username"));

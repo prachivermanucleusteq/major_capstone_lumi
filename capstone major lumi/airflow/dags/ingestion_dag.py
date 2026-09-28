@@ -242,6 +242,13 @@ with DAG(
         input_directory = Path(conf["input_directory"])
         file_format = conf["file_format"].lower()
         error_output_base = Path(conf["error_output"])
+        try:
+            expected_input_records = int(conf["expected_record_count"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "expected_record_count is missing or invalid. Re-trigger this DAG "
+                "from the updated Spring Boot service or provide it in dag_run.conf."
+            ) from exc
 
         input_files = sorted(
             file for file in input_directory.iterdir()
@@ -270,6 +277,12 @@ with DAG(
                         employee_ids.add(str(UUID(row.get("employee_id", "").strip())))
                     except (ValueError, TypeError):
                         pass
+
+        if total_input_records != expected_input_records:
+            raise RuntimeError(
+                f"Input record count mismatch: expected {expected_input_records}, "
+                f"found {total_input_records}"
+            )
 
         error_files = sorted(error_output_base.parent.glob(f"{error_output_base.name}_*.txt"))
         total_error_records = sum(

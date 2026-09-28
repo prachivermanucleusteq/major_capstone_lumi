@@ -69,6 +69,7 @@ public class JsonParser extends DoFn<String, EmployeeRecord> {
             record.setSkills(parseSkills(node));
             record.setAddress(parseJsonb(node, "address"));
             record.setEmergencyContact(parseJsonb(node, "emergency_contact"));
+            record.setSourceCreationTime(Instant.now());
             out.get(VALID_TAG).output(record);
 
         } catch (Exception e) {

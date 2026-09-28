@@ -104,12 +104,12 @@ public class IngestionService {
             LOG.info("File is within split threshold. No splitting required: executionId={}, inputFile={}", executionId, inputFiles.get(0));
         }
 
-        String dagRunId = triggerDagRun(executionId, executionDirectory, inputFiles);
+        String dagRunId = triggerDagRun(executionId, executionDirectory, inputFiles, recordCount);
         LOG.info("Ingestion request accepted: executionId={}, inputFiles={}, dagRunId={}", executionId, inputFiles.size(), dagRunId);
         return new TriggerResponse(executionId, dagRunId, inputFiles.size(), fileSizeBytes > thresholdBytes, "ACCEPTED");
     }
 
-    private String triggerDagRun(String executionId, Path executionDirectory, List<String> inputFiles) {
+    private String triggerDagRun(String executionId, Path executionDirectory, List<String> inputFiles, String recordCount) {
         String airflowInputDirectory = toAirflowDataPath(executionDirectory);
         String fileFormat = getFileExtension(Paths.get(inputFiles.get(0))).replace(".", "");
         String dagRunId = DAG_RUN_PREFIX + executionId;
@@ -120,6 +120,7 @@ public class IngestionService {
         conf.put("execution_id", executionId);
         conf.put("input_directory", airflowInputDirectory);
         conf.put("file_format", fileFormat);
+        conf.put("expected_record_count", recordCount);
         conf.put("jdbc_url", jdbcUrl);
         conf.put("jdbc_username", jdbcUsername);
         conf.put("jdbc_password", jdbcPassword);
