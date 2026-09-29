@@ -16,7 +16,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -77,56 +78,56 @@ public class IngestionService {
 
         LOG.info("Control file loaded: executionId={}, fileName={}, expectedRecordCount={}", executionId, fileName, recordCount);
         Path inputFile = resolveInputFile(filePath);
+        if (!inputFile.getFileName().toString().equals(fileName)) {
+            throw new IllegalArgumentException("file_name '" + fileName
+                    + "' does not match the filename in file_path '"
+                    + inputFile.getFileName() + "'");
+        }
+        Instant sourceCreationTime = getSourceCreationTime(inputFile);
         long fileSizeBytes = getFileSize(inputFile);
         long thresholdBytes = splitThresholdKb * 1024;
         LOG.info("Input file size checked: executionId={}, file={}, sizeBytes={}, thresholdKb={}", executionId, inputFile, fileSizeBytes, splitThresholdKb);
-        Path executionDirectory = Paths.get(splitOutputBase, executionId);
         List<String> inputFiles;
         if (fileSizeBytes > thresholdBytes) {
             LOG.info("File exceeds split threshold. Starting Spark splitter: executionId={}", executionId);
-            inputFiles = invokeSparkSplitter(inputFile, executionDirectory);
+            Path splitDirectory = Paths.get(splitOutputBase, executionId);
+            inputFiles = invokeSparkSplitter(inputFile, splitDirectory);
             if (inputFiles.isEmpty()) {
                 throw new IllegalStateException("Spark splitter produced no output files");
             }
             LOG.info("Spark splitting completed: executionId={}, splitFiles={}", executionId, inputFiles.size());
         } else {
-            try {
-                Files.createDirectories(executionDirectory);
-                Path executionInputFile = executionDirectory.resolve(inputFile.getFileName());
-                Files.copy(inputFile, executionInputFile, StandardCopyOption.REPLACE_EXISTING);
-                inputFiles = List.of(executionInputFile.toString());
-
-            } catch (IOException ex) {
-                LOG.error("Failed to prepare execution input directory: executionId={}, directory={}", executionId, executionDirectory, ex);
-                throw new IllegalStateException("Failed to prepare execution input directory", ex);
-            }
-
-            LOG.info("File is within split threshold. No splitting required: executionId={}, inputFile={}", executionId, inputFiles.get(0));
+            inputFiles = List.of(inputFile.toString());
+            LOG.info("File is within split threshold. No splitting required: executionId={}, inputFile={}", executionId, inputFile);
         }
 
-        String dagRunId = triggerDagRun(executionId, executionDirectory, inputFiles, recordCount);
+        String dagRunId = triggerDagRun(executionId, inputFiles, recordCount, sourceCreationTime);
         LOG.info("Ingestion request accepted: executionId={}, inputFiles={}, dagRunId={}", executionId, inputFiles.size(), dagRunId);
         return new TriggerResponse(executionId, dagRunId, inputFiles.size(), fileSizeBytes > thresholdBytes, "ACCEPTED");
     }
 
-    private String triggerDagRun(String executionId, Path executionDirectory, List<String> inputFiles, String recordCount) {
-        String airflowInputDirectory = toAirflowDataPath(executionDirectory);
+    private String triggerDagRun(String executionId, List<String> inputFiles, String recordCount, Instant sourceCreationTime) {
         String fileFormat = getFileExtension(Paths.get(inputFiles.get(0))).replace(".", "");
         String dagRunId = DAG_RUN_PREFIX + executionId;
         Path localErrorOutput = Paths.get(errorOutputBase, executionId, "errors");
-
         String airflowErrorOutput = toAirflowDataPath(localErrorOutput);
-        Map<String, String> conf = new HashMap<>();
+
+        List<String> airflowInputFiles = inputFiles.stream()
+                .map(f -> toAirflowDataPath(Paths.get(f)))
+                .toList();
+
+        Map<String, Object> conf = new HashMap<>();
         conf.put("execution_id", executionId);
-        conf.put("input_directory", airflowInputDirectory);
+        conf.put("input_files", airflowInputFiles);
         conf.put("file_format", fileFormat);
         conf.put("expected_record_count", recordCount);
+        conf.put("source_creation_time", sourceCreationTime.toString());
         conf.put("jdbc_url", jdbcUrl);
         conf.put("jdbc_username", jdbcUsername);
         conf.put("jdbc_password", jdbcPassword);
         conf.put("error_output", airflowErrorOutput);
-        LOG.info("Triggering Airflow DAG once: executionId={}, dagRunId={}, inputDirectory={}, fileCount={}", executionId, dagRunId, airflowInputDirectory, inputFiles.size());
-        LOG.debug("Airflow paths: inputDirectory={}, errorOutput={}", airflowInputDirectory, airflowErrorOutput);
+        LOG.info("Triggering Airflow DAG: executionId={}, dagRunId={}, fileCount={}", executionId, dagRunId, airflowInputFiles.size());
+        LOG.debug("Airflow input files: {}", airflowInputFiles);
         return airflowClient.triggerDagRun(dagId, dagRunId, conf);
     }
 
@@ -216,12 +217,17 @@ public class IngestionService {
         }
     }
 
+    private Instant getSourceCreationTime(Path inputFile) {
+        try {
+            return Files.readAttributes(inputFile, BasicFileAttributes.class).creationTime().toInstant();
+        } catch (IOException ex) {
+            LOG.error("Unable to determine source file creation time: {}", inputFile, ex);
+            throw new IllegalStateException("Unable to determine source file creation time: " + inputFile, ex);
+        }
+    }
+
     private List<String> invokeSparkSplitter(Path inputFile, Path outputDirectory) {
         List<String> splitFiles = new ArrayList<>();
-        String sparkHome = "C:\\Spark\\spark-3.5.6-bin-hadoop3-scala2.13";
-        String sparkSubmit = sparkHome + "\\bin\\spark-submit.cmd";
-        String pythonHome = "C:\\Users\\user\\AppData\\Local\\Programs\\Python\\Python310";
-        String pythonExecutable = pythonHome + "\\python.exe";
         ProcessBuilder processBuilder = new ProcessBuilder(
                 "cmd.exe", "/c", sparkSubmit,
                 "--master", "local[*]", pysparkScript,
@@ -229,12 +235,6 @@ public class IngestionService {
                 "--output_dir", outputDirectory.toString(),
                 "--threshold_kb", String.valueOf(splitThresholdKb)
         );
-        Map<String, String> environment = processBuilder.environment();
-        environment.put("SPARK_HOME", sparkHome);
-        environment.put("PYSPARK_PYTHON", pythonExecutable);
-        environment.put("PYSPARK_DRIVER_PYTHON", pythonExecutable);
-        String currentPath = environment.get("PATH");
-        environment.put("PATH", sparkHome + "\\bin;" + pythonHome + ";" + pythonHome + "\\Scripts;" + currentPath);
 
         processBuilder.redirectErrorStream(true);
         LOG.info("Starting Spark splitter: inputFile={}, outputDirectory={}, thresholdKb={}", inputFile, outputDirectory, splitThresholdKb);

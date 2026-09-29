@@ -3,6 +3,8 @@ package com.lumi.ingestion.controller;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lumi.ingestion.dto.request.TriggerRequest;
 import com.lumi.ingestion.dto.response.TriggerResponse;
+import com.lumi.ingestion.exception.IngestionException;
+import com.lumi.ingestion.exception.InputFileNotFoundException;
 import com.lumi.ingestion.service.IngestionService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -60,5 +62,61 @@ class IngestionControllerTest {
                        .contentType(MediaType.APPLICATION_JSON)
                        .content("{}"))
                .andExpect(status().isBadRequest());
+   }
+
+   @Test
+   void airflowFailure_returns502() throws Exception {
+       when(ingestionService.trigger(any()))
+               .thenThrow(new org.springframework.web.client.RestClientException("Airflow unavailable"));
+       TriggerRequest req = new TriggerRequest();
+       req.setControlFile("data/control/employee_control.txt");
+
+       mockMvc.perform(post("/api/ingestion/trigger")
+                       .contentType(MediaType.APPLICATION_JSON)
+                       .content(objectMapper.writeValueAsString(req)))
+               .andExpect(status().isBadGateway())
+               .andExpect(jsonPath("$.error").value("Failed to trigger Airflow DAG"));
+   }
+
+   @Test
+   void ingestionFailure_returns400() throws Exception {
+           when(ingestionService.trigger(any())).thenThrow(new IngestionException("invalid ingestion request"));
+           TriggerRequest req = new TriggerRequest();
+           req.setControlFile("data/control/employee_control.txt");
+
+           mockMvc.perform(post("/api/ingestion/trigger")
+                                           .contentType(MediaType.APPLICATION_JSON)
+                                           .content(objectMapper.writeValueAsString(req)))
+                           .andExpect(status().isBadRequest())
+                           .andExpect(jsonPath("$.status").value(400))
+                           .andExpect(jsonPath("$.message").value("invalid ingestion request"));
+   }
+
+   @Test
+   void missingControlFile_returns404() throws Exception {
+           when(ingestionService.trigger(any())).thenThrow(new InputFileNotFoundException("control file not found"));
+           TriggerRequest req = new TriggerRequest();
+           req.setControlFile("data/control/missing.properties");
+
+           mockMvc.perform(post("/api/ingestion/trigger")
+                                           .contentType(MediaType.APPLICATION_JSON)
+                                           .content(objectMapper.writeValueAsString(req)))
+                           .andExpect(status().isNotFound())
+                           .andExpect(jsonPath("$.status").value(404))
+                           .andExpect(jsonPath("$.message").value("control file not found"));
+   }
+
+   @Test
+   void unexpectedFailure_returnsGeneric500() throws Exception {
+           when(ingestionService.trigger(any())).thenThrow(new IllegalStateException("internal details"));
+           TriggerRequest req = new TriggerRequest();
+           req.setControlFile("data/control/employee_control.txt");
+
+           mockMvc.perform(post("/api/ingestion/trigger")
+                                           .contentType(MediaType.APPLICATION_JSON)
+                                           .content(objectMapper.writeValueAsString(req)))
+                           .andExpect(status().isInternalServerError())
+                           .andExpect(jsonPath("$.status").value(500))
+                           .andExpect(jsonPath("$.message").value("An unexpected error occurred"));
    }
 }

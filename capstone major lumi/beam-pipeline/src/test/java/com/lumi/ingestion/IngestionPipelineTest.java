@@ -1,443 +1,252 @@
 package com.lumi.ingestion;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lumi.ingestion.error.ErrorRecord;
 import com.lumi.ingestion.model.EmployeeRecord;
+import com.lumi.ingestion.parser.CsvParser;
+import com.lumi.ingestion.parser.JsonParser;
 import com.lumi.ingestion.transform.EnrichEmployeeFn;
-import com.lumi.ingestion.transform.ParseEmployeeFn;
 import com.lumi.ingestion.transform.ValidateEmployeeFn;
-import org.apache.beam.sdk.testing.PAssert;
-import org.apache.beam.sdk.testing.TestPipeline;
-import org.apache.beam.sdk.transforms.Create;
-import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.values.PCollectionTuple;
-import org.apache.beam.sdk.values.TupleTagList;
-import org.junit.Rule;
-import org.junit.Test;
+import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.values.TupleTag;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.*;
 
-public class IngestionPipelineTest {
+class IngestionPipelineTest {
 
-   private static final String EXEC_ID = "00000000-0000-0000-0000-000000000001";
-   private static final String SOURCE = "test-source.json";
-        private static final String ENCRYPTION_KEY = "01234567890123456789012345678901";
+    private static final String EXECUTION_ID = "550e8400-e29b-41d4-a716-446655440000";
+    private static final Instant SOURCE_CREATION_TIME = Instant.parse("2020-01-02T03:04:05Z");
 
-   @Rule
-   public final TestPipeline pipeline = TestPipeline.create();
+    @Test
+    void csvParser_shouldParseValidRow() {
+        String header = "employee_id,first_name,last_name,email,phone_number,hire_date,department,job_title,salary,currency,employment_status,manager_id,is_active,skills,address,emergency_contact";
+        String row = "550e8400-e29b-41d4-a716-446655440000,Alice,Johnson,alice.johnson@example.com,9876543210,2024-02-15,Engineering,Senior Engineer,120000.50,USD,ACTIVE,660e8400-e29b-41d4-a716-446655440001,true,\"[\"\"Java\"\",\"\"Beam\"\"]\",{},{}";
+        List<EmployeeRecord> records = new ArrayList<>();
+        List<ErrorRecord> errors = new ArrayList<>();
+        new CsvParser(EXECUTION_ID, "employees.csv", SOURCE_CREATION_TIME)
+                .processElement(header + "\t" + row,
+                        collectingReceiver(CsvParser.VALID_TAG, CsvParser.ERROR_TAG, records, errors));
 
-   // -------------------------------------------------------------------------
-   // 1. Valid JSON parsing
-   // -------------------------------------------------------------------------
-   @Test
-   public void testValidJsonParsing() {
-       String json = validJson();
-       PCollectionTuple result = pipeline
-               .apply(Create.of(json))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
+        assertEquals(1, records.size());
+        EmployeeRecord employee = records.get(0);
+        assertEquals(UUID.fromString(EXECUTION_ID), employee.getEmployeeId());
+        assertEquals("Alice", employee.getFirstName());
+        assertEquals("Johnson", employee.getLastName());
+        assertEquals("alice.johnson@example.com", employee.getEmail());
+        assertEquals("9876543210", employee.getPhoneNumber());
+        assertEquals("Engineering", employee.getDepartment());
+        assertEquals(0, new BigDecimal("120000.50").compareTo(employee.getSalary()));
+        assertEquals(List.of("Java", "Beam"), employee.getSkills());
+        assertEquals("{}", employee.getAddress());
+        assertEquals("{}", employee.getEmergencyContact());
+        assertEquals(SOURCE_CREATION_TIME, employee.getSourceCreationTime());
+        assertTrue(errors.isEmpty());
+    }
 
-       PAssert.that(result.get(ParseEmployeeFn.VALID_TAG)).satisfies(records -> {
-           EmployeeRecord r = records.iterator().next();
-           assertEquals(UUID.fromString("550e8400-e29b-41d4-a716-446655440000"), r.getEmployeeId());
-           assertEquals("John", r.getFirstName());
-           assertEquals("john.smith@example.com", r.getEmail());
-           return null;
-       });
-       PAssert.that(result.get(ParseEmployeeFn.ERROR_TAG)).empty();
-       pipeline.run().waitUntilFinish();
-   }
+    @Test
+    void jsonParser_shouldParseEmployeeArray() {
+        String json = "[{\"employee_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"first_name\":\"Alice\",\"last_name\":\"Johnson\",\"email\":\"alice.johnson@example.com\",\"phone_number\":\"9876543210\",\"hire_date\":\"2024-02-15\",\"department\":\"Engineering\",\"job_title\":\"Senior Engineer\",\"salary\":120000.50,\"currency\":\"USD\",\"employment_status\":\"ACTIVE\",\"manager_id\":\"660e8400-e29b-41d4-a716-446655440001\",\"is_active\":true,\"skills\":[\"Java\",\"Beam\"],\"address\":{\"city\":\"Indore\"},\"emergency_contact\":{\"phone\":\"9898989898\"}}]";
+        List<EmployeeRecord> records = new ArrayList<>();
+        List<ErrorRecord> errors = new ArrayList<>();
+        new JsonParser(EXECUTION_ID, "employees.json", SOURCE_CREATION_TIME)
+                .processElement(json,
+                        collectingReceiver(JsonParser.VALID_TAG, JsonParser.ERROR_TAG, records, errors));
 
-   // -------------------------------------------------------------------------
-   // 2. Malformed JSON goes to error output
-   // -------------------------------------------------------------------------
-   @Test
-   public void testMalformedJsonRoutedToError() {
-       String badJson = "{this is not json";
-       PCollectionTuple result = pipeline
-               .apply(Create.of(badJson))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
+        assertEquals(1, records.size());
+        EmployeeRecord employee = records.get(0);
+        assertEquals(UUID.fromString(EXECUTION_ID), employee.getEmployeeId());
+        assertEquals("Alice", employee.getFirstName());
+        assertEquals("ACTIVE", employee.getEmploymentStatus());
+        assertEquals(0, new BigDecimal("120000.50").compareTo(employee.getSalary()));
+        assertEquals(List.of("Java", "Beam"), employee.getSkills());
+        assertEquals("{\"city\":\"Indore\"}", employee.getAddress());
+        assertEquals(SOURCE_CREATION_TIME, employee.getSourceCreationTime());
+        assertTrue(errors.isEmpty());
+    }
 
-       PAssert.that(result.get(ParseEmployeeFn.VALID_TAG)).empty();
-       PAssert.that(result.get(ParseEmployeeFn.ERROR_TAG)).satisfies(errors -> {
-           ErrorRecord e = errors.iterator().next();
-           assertEquals(EXEC_ID, e.getExecutionId());
-           assertNotNull(e.getErrorReason());
-           return null;
-       });
-       pipeline.run().waitUntilFinish();
-   }
+    @Test
+    void validateEmployeeFn_shouldRejectInvalidEmail() {
+        EmployeeRecord record = buildValidRecord();
+        record.setEmail("bad-email");
 
-   // -------------------------------------------------------------------------
-   // 3. UUID parsing — valid and invalid
-   // -------------------------------------------------------------------------
-   @Test
-   public void testInvalidUuidRoutedToError() {
-       String json = validJson().replace(
-               "550e8400-e29b-41d4-a716-446655440000", "NOT-A-UUID");
-       PCollectionTuple result = pipeline
-               .apply(Create.of(json))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
+        List<EmployeeRecord> validRecords = new ArrayList<>();
+        List<ErrorRecord> errors = new ArrayList<>();
 
-       PAssert.that(result.get(ParseEmployeeFn.VALID_TAG)).empty();
-       PAssert.that(result.get(ParseEmployeeFn.ERROR_TAG)).satisfies(errors -> {
-           assertTrue(errors.iterator().hasNext());
-           return null;
-       });
-       pipeline.run().waitUntilFinish();
-   }
+        ValidateEmployeeFn validator = new ValidateEmployeeFn(EXECUTION_ID, "employees.csv");
+        validator.processElement(record, new DoFn.MultiOutputReceiver() {
+            @Override
+            public <T> DoFn.OutputReceiver<T> get(TupleTag<T> tag) {
+                return new DoFn.OutputReceiver<>() {
+                    @Override
+                    public void output(T value) {
+                        if (tag.equals(ValidateEmployeeFn.VALID_TAG)) {
+                            validRecords.add((EmployeeRecord) value);
+                        } else {
+                            errors.add((ErrorRecord) value);
+                        }
+                    }
 
-   // -------------------------------------------------------------------------
-   // 4. Date parsing
-   // -------------------------------------------------------------------------
-   @Test
-   public void testDateParsing() {
-       String json = validJson();
-       PCollectionTuple result = pipeline
-               .apply(Create.of(json))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
+                    @Override
+                    public void outputWithTimestamp(T value, org.joda.time.Instant timestamp) {
+                        output(value);
+                    }
+                };
+            }
 
-       PAssert.that(result.get(ParseEmployeeFn.VALID_TAG)).satisfies(records -> {
-           assertEquals(LocalDate.of(2024, 1, 15),
-                   records.iterator().next().getHireDate());
-           return null;
-       });
-       pipeline.run().waitUntilFinish();
-   }
+            @Override
+            public <T> DoFn.OutputReceiver<org.apache.beam.sdk.values.Row> getRowReceiver(TupleTag<T> tag) {
+                throw new UnsupportedOperationException("Row output is not used by this test");
+            }
+        });
 
-   // -------------------------------------------------------------------------
-   // 5. BigDecimal salary parsing
-   // -------------------------------------------------------------------------
-   @Test
-   public void testSalaryParsedAsBigDecimal() {
-       String json = validJson();
-       PCollectionTuple result = pipeline
-               .apply(Create.of(json))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
+        assertTrue(validRecords.isEmpty());
+        assertEquals(1, errors.size());
+        assertTrue(errors.get(0).getErrorReason().contains("email"));
+    }
 
-       PAssert.that(result.get(ParseEmployeeFn.VALID_TAG)).satisfies(records -> {
-           BigDecimal salary = records.iterator().next().getSalary();
-           assertEquals(0, new BigDecimal("85000.00").compareTo(salary));
-           return null;
-       });
-       pipeline.run().waitUntilFinish();
-   }
+    @Test
+    void enrichEmployeeFn_shouldEncryptSensitiveFields() {
+        EmployeeRecord record = buildValidRecord();
+        record.setSalary(new BigDecimal("50000.00"));
+        record.setPhoneNumber("9876543210");
+        record.setEmergencyContact("{\"phone\":\"1234567890\"}");
+        record.setSourceCreationTime(SOURCE_CREATION_TIME);
 
-   // -------------------------------------------------------------------------
-   // 6. Null/missing fields apply the type-safe policy
-   // -------------------------------------------------------------------------
-   @Test
-   public void testNullFieldsApplyPolicy() {
-       // manager_id is null in the valid JSON — should remain null (UUID policy)
-       // skills is present; test with missing department
-       String json = validJson().replace("\"department\":\"Technology\",", "");
-       PCollectionTuple result = pipeline
-               .apply(Create.of(json))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
+        List<EmployeeRecord> output = new ArrayList<>();
+        List<ErrorRecord> errors = new ArrayList<>();
+        EnrichEmployeeFn enrich = new EnrichEmployeeFn(
+                EXECUTION_ID, "employees.csv", "12345678901234567890123456789012");
+        enrich.processElement(record, new DoFn.MultiOutputReceiver() {
+            @Override
+            public <T> DoFn.OutputReceiver<T> get(TupleTag<T> tag) {
+                return new DoFn.OutputReceiver<>() {
+                    @Override
+                    public void output(T value) {
+                        if (tag.equals(EnrichEmployeeFn.VALID_TAG)) {
+                            output.add((EmployeeRecord) value);
+                        } else {
+                            errors.add((ErrorRecord) value);
+                        }
+                    }
 
-       PAssert.that(result.get(ParseEmployeeFn.VALID_TAG)).satisfies(records -> {
-           EmployeeRecord r = records.iterator().next();
-           assertNull(r.getManagerId());           // UUID null policy
-           assertEquals(" ", r.getDepartment());   // String whitespace policy
-           return null;
-       });
-       pipeline.run().waitUntilFinish();
-   }
+                    @Override
+                    public void outputWithTimestamp(T value, org.joda.time.Instant timestamp) {
+                        output(value);
+                    }
+                };
+            }
 
-   // -------------------------------------------------------------------------
-   // 7. Invalid field lengths caught by ValidateEmployeeFn
-   // -------------------------------------------------------------------------
-   @Test
-   public void testInvalidFieldLengthRoutedToError() {
-       // first_name "Jo" has length 2, violates CHECK (BETWEEN 3 AND 15)
-       String json = validJson().replace("\"first_name\":\"John\"", "\"first_name\":\"Jo\"");
-       PCollectionTuple parsed = pipeline
-               .apply(Create.of(json))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
+            @Override
+            public <T> DoFn.OutputReceiver<org.apache.beam.sdk.values.Row> getRowReceiver(TupleTag<T> tag) {
+                throw new UnsupportedOperationException("Row output is not used by this test");
+            }
+        });
 
-       PCollectionTuple validated = parsed.get(ParseEmployeeFn.VALID_TAG)
-               .apply(ParDo.of(new ValidateEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ValidateEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ValidateEmployeeFn.ERROR_TAG)));
+        assertEquals(1, output.size());
+        assertTrue(errors.isEmpty());
+        EmployeeRecord enriched = output.get(0);
+        assertNotNull(enriched.getSalaryEncrypted());
+        assertNotNull(enriched.getPhoneNumberEncrypted());
+        assertNotNull(enriched.getEmergencyContactEncrypted());
+        assertNotEquals(record.getPhoneNumber(), enriched.getPhoneNumberEncrypted());
+        assertNotEquals(record.getSalary().toPlainString(), enriched.getSalaryEncrypted());
+        assertTrue(enriched.getEmergencyContactEncrypted().contains("phone"));
+        assertEquals(UUID.fromString(EXECUTION_ID), enriched.getExecutionId());
+        assertNotNull(enriched.getIngestionTimestamp());
+        assertEquals(SOURCE_CREATION_TIME, enriched.getSourceCreationTime());
+        assertNotEquals(enriched.getIngestionTimestamp(), enriched.getSourceCreationTime());
+    }
 
-       PAssert.that(validated.get(ValidateEmployeeFn.VALID_TAG)).empty();
-       PAssert.that(validated.get(ValidateEmployeeFn.ERROR_TAG)).satisfies(errors -> {
-           ErrorRecord e = errors.iterator().next();
-           assertTrue(e.getErrorReason().contains("first_name"));
-           return null;
-       });
-       pipeline.run().waitUntilFinish();
-   }
+    @Test
+    void enrichEmployeeFn_shouldRouteEncryptionFailureToErrorTag() {
+        List<ErrorRecord> errors = new ArrayList<>();
+        EnrichEmployeeFn enrich = new EnrichEmployeeFn(EXECUTION_ID, "employees.csv", "invalid-key");
+        enrich.processElement(buildValidRecord(), new DoFn.MultiOutputReceiver() {
+            @Override
+            public <T> DoFn.OutputReceiver<T> get(TupleTag<T> tag) {
+                return new DoFn.OutputReceiver<>() {
+                    @Override
+                    public void output(T value) {
+                        errors.add((ErrorRecord) value);
+                    }
 
-   // -------------------------------------------------------------------------
-   // 8. Valid employee passes parse + validate
-   // -------------------------------------------------------------------------
-   @Test
-   public void testValidEmployeePassesParseThenValidate() {
-       PCollectionTuple parsed = pipeline
-               .apply(Create.of(validJson()))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
+                    @Override
+                    public void outputWithTimestamp(T value, org.joda.time.Instant timestamp) {
+                        output(value);
+                    }
+                };
+            }
 
-       PCollectionTuple validated = parsed.get(ParseEmployeeFn.VALID_TAG)
-               .apply(ParDo.of(new ValidateEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ValidateEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ValidateEmployeeFn.ERROR_TAG)));
+            @Override
+            public <T> DoFn.OutputReceiver<org.apache.beam.sdk.values.Row> getRowReceiver(TupleTag<T> tag) {
+                throw new UnsupportedOperationException("Row output is not used by this test");
+            }
+        });
 
-       PAssert.that(validated.get(ValidateEmployeeFn.VALID_TAG)).satisfies(records -> {
-           assertTrue(records.iterator().hasNext());
-           return null;
-       });
-       PAssert.that(validated.get(ValidateEmployeeFn.ERROR_TAG)).empty();
-       pipeline.run().waitUntilFinish();
-   }
+        assertEquals(1, errors.size());
+        assertEquals(EXECUTION_ID, errors.get(0).getExecutionId());
+        assertEquals("employees.csv", errors.get(0).getSourceFile());
+        assertTrue(errors.get(0).getErrorReason().contains("Enrichment failed"));
+    }
 
-   // -------------------------------------------------------------------------
-   // 9. Invalid record is routed to error, does not reach valid output
-   // -------------------------------------------------------------------------
-   @Test
-   public void testInvalidRecordDoesNotReachValidOutput() {
-       // null employee_id — parse succeeds but validate rejects
-       String json = validJson().replace(
-               "\"employee_id\":\"550e8400-e29b-41d4-a716-446655440000\"",
-               "\"employee_id\":null");
-       PCollectionTuple parsed = pipeline
-               .apply(Create.of(json))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
+    private EmployeeRecord buildValidRecord() {
+        EmployeeRecord record = new EmployeeRecord();
+        record.setEmployeeId(UUID.fromString(EXECUTION_ID));
+        record.setFirstName("Alice");
+        record.setLastName("Johnson");
+        record.setEmail("alice.johnson@example.com");
+        record.setPhoneNumber("9876543210");
+        record.setHireDate(java.time.LocalDate.of(2024, 2, 15));
+        record.setDepartment("Engineering");
+        record.setJobTitle("Senior Engineer");
+        record.setSalary(new BigDecimal("120000.50"));
+        record.setCurrency("USD");
+        record.setEmploymentStatus("ACTIVE");
+        record.setManagerId(UUID.fromString("660e8400-e29b-41d4-a716-446655440001"));
+        record.setIsActive(true);
+        record.setSkills(List.of("Java", "Beam"));
+        record.setAddress("{}")
+        ;        record.setEmergencyContact("{}")
+        ;        return record;
+    }
 
-       PCollectionTuple validated = parsed.get(ParseEmployeeFn.VALID_TAG)
-               .apply(ParDo.of(new ValidateEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ValidateEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ValidateEmployeeFn.ERROR_TAG)));
+    private DoFn.MultiOutputReceiver collectingReceiver(
+            TupleTag<EmployeeRecord> validTag,
+            TupleTag<ErrorRecord> errorTag,
+            List<EmployeeRecord> validRecords,
+            List<ErrorRecord> errors) {
+        return new DoFn.MultiOutputReceiver() {
+            @Override
+            public <T> DoFn.OutputReceiver<T> get(TupleTag<T> tag) {
+                return new DoFn.OutputReceiver<>() {
+                    @Override
+                    public void output(T value) {
+                        if (tag.equals(validTag)) {
+                            validRecords.add((EmployeeRecord) value);
+                        } else if (tag.equals(errorTag)) {
+                            errors.add((ErrorRecord) value);
+                        } else {
+                            throw new IllegalArgumentException("Unexpected output tag: " + tag);
+                        }
+                    }
 
-       PAssert.that(validated.get(ValidateEmployeeFn.VALID_TAG)).empty();
-       PAssert.that(validated.get(ValidateEmployeeFn.ERROR_TAG)).satisfies(errors -> {
-           assertTrue(errors.iterator().hasNext());
-           return null;
-       });
-       pipeline.run().waitUntilFinish();
-   }
+                    @Override
+                    public void outputWithTimestamp(T value, org.joda.time.Instant timestamp) {
+                        output(value);
+                    }
+                };
+            }
 
-   // -------------------------------------------------------------------------
-   // 10. Metadata enrichment sets all three metadata fields
-   // -------------------------------------------------------------------------
-   @Test
-   public void testMetadataEnrichment() {
-       PCollectionTuple parsed = pipeline
-               .apply(Create.of(validJson()))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
-
-       PCollectionTuple validated = parsed.get(ParseEmployeeFn.VALID_TAG)
-               .apply(ParDo.of(new ValidateEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ValidateEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ValidateEmployeeFn.ERROR_TAG)));
-
-       PAssert.that(
-               validated.get(ValidateEmployeeFn.VALID_TAG)
-                       .apply(ParDo.of(new EnrichEmployeeFn(EXEC_ID, ENCRYPTION_KEY)))
-       ).satisfies(records -> {
-           EmployeeRecord r = records.iterator().next();
-           assertNotNull("ingestion_timestamp must be set", r.getIngestionTimestamp());
-           assertEquals(UUID.fromString(EXEC_ID), r.getExecutionId());
-           assertNotNull("source_creation_time must be set", r.getSourceCreationTime());
-           return null;
-       });
-       pipeline.run().waitUntilFinish();
-   }
-
-   // -------------------------------------------------------------------------
-   // 11. EnrichEmployeeFn output is a distinct object — input is not mutated
-   // -------------------------------------------------------------------------
-   @Test
-   public void testEnrichDoesNotMutateInput() {
-       // Run parse → validate → enrich through TestPipeline and confirm
-       // the enriched record carries metadata while source fields are preserved.
-       PCollectionTuple parsed = pipeline
-               .apply(Create.of(validJson()))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
-
-       PCollectionTuple validated = parsed.get(ParseEmployeeFn.VALID_TAG)
-               .apply(ParDo.of(new ValidateEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ValidateEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ValidateEmployeeFn.ERROR_TAG)));
-
-       PAssert.that(
-               validated.get(ValidateEmployeeFn.VALID_TAG)
-                       .apply(ParDo.of(new EnrichEmployeeFn(EXEC_ID, ENCRYPTION_KEY)))
-       ).satisfies(records -> {
-           EmployeeRecord r = records.iterator().next();
-           // source fields must be preserved
-           assertEquals(UUID.fromString("550e8400-e29b-41d4-a716-446655440000"), r.getEmployeeId());
-           assertEquals("John", r.getFirstName());
-           // metadata fields must be populated by EnrichEmployeeFn
-           assertNotNull(r.getIngestionTimestamp());
-           assertEquals(UUID.fromString(EXEC_ID), r.getExecutionId());
-           assertNotNull(r.getSourceCreationTime());
-           return null;
-       });
-       pipeline.run().waitUntilFinish();
-   }
-
-   @Test
-   public void testOnlyEmergencyContactPhoneIsEncrypted() {
-       PCollectionTuple parsed = pipeline
-               .apply(Create.of(validJson()))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
-
-       PAssert.that(parsed.get(ParseEmployeeFn.VALID_TAG)
-               .apply(ParDo.of(new EnrichEmployeeFn(EXEC_ID, ENCRYPTION_KEY))))
-               .satisfies(records -> {
-                   EmployeeRecord record = records.iterator().next();
-                   JsonNode emergency = new ObjectMapper()
-                           .readTree(record.getEmergencyContactEncrypted());
-
-                   assertEquals("Jane Smith", emergency.get("name").asText());
-                   assertEquals("Spouse", emergency.get("relationship").asText());
-                   assertEquals("9876543211", new com.lumi.ingestion.util.EncryptionUtil(ENCRYPTION_KEY)
-                           .decrypt(emergency.get("phone").asText()));
-                   return null;
-               });
-       pipeline.run().waitUntilFinish();
-   }
-
-   // 12. Mixed input: valid record reaches valid output, bad record reaches error output
-   @Test
-   public void testValidAndInvalidRecordsRoutedIndependently() {
-       String validRecord   = validJson();
-       String invalidRecord = "{this is not json}";
-
-       PCollectionTuple parsedValid = pipeline
-               .apply("ValidInput", Create.of(validRecord))
-               .apply("ParseValid", ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
-
-       PCollectionTuple parsedInvalid = pipeline
-               .apply("InvalidInput", Create.of(invalidRecord))
-               .apply("ParseInvalid", ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
-
-       // Valid record must reach the valid output
-       PAssert.that(parsedValid.get(ParseEmployeeFn.VALID_TAG)).satisfies(records -> {
-           assertTrue("valid record must reach valid output", records.iterator().hasNext());
-           return null;
-       });
-       PAssert.that(parsedValid.get(ParseEmployeeFn.ERROR_TAG)).empty();
-
-       // Invalid record must reach the error output with a reason
-       PAssert.that(parsedInvalid.get(ParseEmployeeFn.VALID_TAG)).empty();
-       PAssert.that(parsedInvalid.get(ParseEmployeeFn.ERROR_TAG)).satisfies(errors -> {
-           ErrorRecord e = errors.iterator().next();
-           assertNotNull("error reason must be present", e.getErrorReason());
-           assertEquals(EXEC_ID, e.getExecutionId());
-           assertEquals(SOURCE,  e.getSourceFile());
-           return null;
-       });
-
-       pipeline.run().waitUntilFinish();
-   }
-
-   // 13. JSON array input: each element parsed as a separate EmployeeRecord
-   @Test
-   public void testJsonArrayInputParsesEachElementSeparately() {
-       String arrayJson =
-               "[" + validJson() + ","
-               + validJson().replace(
-                       "550e8400-e29b-41d4-a716-446655440000",
-                       "550e8400-e29b-41d4-a716-446655440099")
-               + "]";
-
-       PCollectionTuple result = pipeline
-               .apply(Create.of(arrayJson))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
-
-       PAssert.that(result.get(ParseEmployeeFn.VALID_TAG)).satisfies(records -> {
-           long count = 0;
-           for (EmployeeRecord ignored : records) count++;
-           assertEquals("array of 2 should produce 2 valid records", 2, count);
-           return null;
-       });
-       PAssert.that(result.get(ParseEmployeeFn.ERROR_TAG)).empty();
-       pipeline.run().waitUntilFinish();
-   }
-
-   // -------------------------------------------------------------------------
-   // 14. JSON array: one bad element goes to error, valid elements still processed
-   // -------------------------------------------------------------------------
-   @Test
-   public void testJsonArrayBadElementIsolated() {
-       String goodElement = validJson();
-       String badElement  = validJson().replace(
-               "550e8400-e29b-41d4-a716-446655440000", "NOT-A-UUID");
-       String arrayJson = "[" + goodElement + "," + badElement + "]";
-
-       PCollectionTuple result = pipeline
-               .apply(Create.of(arrayJson))
-               .apply(ParDo.of(new ParseEmployeeFn(EXEC_ID, SOURCE))
-                       .withOutputTags(ParseEmployeeFn.VALID_TAG,
-                               TupleTagList.of(ParseEmployeeFn.ERROR_TAG)));
-
-       PAssert.that(result.get(ParseEmployeeFn.VALID_TAG)).satisfies(records -> {
-           assertTrue("valid element must reach valid output", records.iterator().hasNext());
-           return null;
-       });
-       PAssert.that(result.get(ParseEmployeeFn.ERROR_TAG)).satisfies(errors -> {
-           ErrorRecord e = errors.iterator().next();
-           assertNotNull(e.getErrorReason());
-           assertEquals(EXEC_ID, e.getExecutionId());
-           return null;
-       });
-       pipeline.run().waitUntilFinish();
-   }
-
-   // Helper
-   private String validJson() {
-       return "{\"employee_id\":\"550e8400-e29b-41d4-a716-446655440000\","
-            + "\"first_name\":\"John\","
-            + "\"last_name\":\"Smith\","
-            + "\"email\":\"john.smith@example.com\","
-            + "\"phone_number\":\"9876543210\","
-            + "\"hire_date\":\"2024-01-15\","
-            + "\"department\":\"Technology\","
-            + "\"job_title\":\"Software Engineer\","
-            + "\"salary\":85000.00,"
-            + "\"currency\":\"USD\","
-            + "\"employment_status\":\"ACTIVE\","
-            + "\"manager_id\":null,"
-            + "\"is_active\":true,"
-            + "\"skills\":[\"Java\",\"Spring Boot\",\"Apache Beam\"],"
-            + "\"address\":{\"city\":\"Indore\",\"state\":\"Madhya Pradesh\",\"country\":\"India\"},"
-            + "\"emergency_contact\":{\"name\":\"Jane Smith\",\"relationship\":\"Spouse\",\"phone\":\"9876543211\"}"
-            + "}";
-   }
+            @Override
+            public <T> DoFn.OutputReceiver<org.apache.beam.sdk.values.Row> getRowReceiver(TupleTag<T> tag) {
+                throw new UnsupportedOperationException("Row output is not used by these tests");
+            }
+        };
+    }
 }

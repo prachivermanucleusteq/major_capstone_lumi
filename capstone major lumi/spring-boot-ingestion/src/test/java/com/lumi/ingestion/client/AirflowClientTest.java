@@ -2,45 +2,62 @@ package com.lumi.ingestion.client;
 
 import com.lumi.ingestion.client.airflow.AirflowClient;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.client.RestClientTest;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.MediaType;
-import org.springframework.test.context.TestPropertySource;
-import org.springframework.test.web.client.MockRestServiceServer;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestTemplate;
 
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.springframework.test.web.client.match.MockRestRequestMatchers.*;
-import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
-@RestClientTest(AirflowClient.class)
-@TestPropertySource(properties = {
-       "airflow.base-url=http://airflow:8080",
-       "airflow.username=admin",
-       "airflow.password=admin"
-})
 class AirflowClientTest {
 
-   @Autowired AirflowClient airflowClient;
-   @Autowired MockRestServiceServer server;
+	private static final String URL = "http://airflow:8080/api/v1/dags/lumi_ingestion_dag/dagRuns";
 
-   @Test
-   void triggerDagRun_sendsCorrectRequestAndReturnsRunId() {
-       server.expect(requestTo("http://airflow:8080/api/v1/dags/lumi_ingestion_dag/dagRuns"))
-             .andExpect(method(HttpMethod.POST))
-             .andExpect(header("Authorization", "Basic YWRtaW46YWRtaW4="))
-             .andRespond(withSuccess(
-                     "{\"dag_run_id\":\"lumi-abc-123\"}",
-                     MediaType.APPLICATION_JSON));
+	@Test
+	void triggerDagRun_returnsRunIdFromAirflowAndSendsAuth() {
+		RestTemplate restTemplate = mock(RestTemplate.class);
+		AirflowClient client = new AirflowClient(restTemplate, "http://airflow:8080", "admin", "admin");
+		when(restTemplate.postForObject(eq(URL), any(HttpEntity.class), eq(Map.class)))
+				.thenReturn(Map.of("dag_run_id", "confirmed-run"));
 
-       String runId = airflowClient.triggerDagRun(
-               "lumi_ingestion_dag",
-               "lumi-abc-123",
-               Map.of("input_file", "data/json/employees.json", "execution_id", "abc-123"));
+		String runId = client.triggerDagRun("lumi_ingestion_dag", "requested-run", Map.of("execution_id", "abc"));
 
-       assertEquals("lumi-abc-123", runId);
-       server.verify();
-   }
+		assertEquals("confirmed-run", runId);
+		verify(restTemplate).postForObject(eq(URL), argThat((HttpEntity<?> request) -> {
+		    Map<?, ?> body = (Map<?, ?>) request.getBody();
+		    return "Basic YWRtaW46YWRtaW4=".equals(
+			    request.getHeaders().getFirst(HttpHeaders.AUTHORIZATION))
+			    && "requested-run".equals(body.get("dag_run_id"))
+			    && Map.of("execution_id", "abc").equals(body.get("conf"));
+		}), eq(Map.class));
+	}
+
+	@Test
+	void triggerDagRun_usesRequestedRunIdWhenAirflowReturnsNoBody() {
+		RestTemplate restTemplate = mock(RestTemplate.class);
+		AirflowClient client = new AirflowClient(restTemplate, "http://airflow:8080", "admin", "secret");
+		when(restTemplate.postForObject(eq(URL), any(HttpEntity.class), eq(Map.class))).thenReturn(null);
+
+		assertEquals("requested-run", client.triggerDagRun("lumi_ingestion_dag", "requested-run", Map.of()));
+	}
+
+	@Test
+	void triggerDagRun_propagatesAirflowFailure() {
+		RestTemplate restTemplate = mock(RestTemplate.class);
+		AirflowClient client = new AirflowClient(restTemplate, "http://airflow:8080", "admin", "secret");
+		when(restTemplate.postForObject(eq(URL), any(HttpEntity.class), eq(Map.class)))
+				.thenThrow(new RestClientException("Airflow unavailable"));
+
+		assertThrows(RestClientException.class,
+				() -> client.triggerDagRun("lumi_ingestion_dag", "requested-run", Map.of()));
+	}
 }
