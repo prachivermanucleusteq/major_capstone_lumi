@@ -47,7 +47,8 @@ class IngestionServiceTest {
                 10_485_760L,
                 testDataRoot.resolve("splits").toString(),
                 "spark-submit",
-                "/opt/lumi/pyspark/split_file.py"
+                "/opt/lumi/pyspark/split_file.py",
+                "python"
         );
     }
 

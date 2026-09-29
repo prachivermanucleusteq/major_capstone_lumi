@@ -45,6 +45,19 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response);
     }
 
+    @ExceptionHandler(SparkSplitterException.class)
+    public ResponseEntity<ErrorResponse> handleSparkSplitterException(SparkSplitterException ex, HttpServletRequest request) {
+        LOG.error("Spark splitter failed: path={}", request.getRequestURI(), ex);
+        ErrorResponse response = new ErrorResponse(
+                Instant.now(),
+                HttpStatus.INTERNAL_SERVER_ERROR.value(),
+                "Spark Splitter Failed",
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<ErrorResponse> handleInvalidInput(IllegalArgumentException ex, HttpServletRequest request) {
         ErrorResponse response = new ErrorResponse(

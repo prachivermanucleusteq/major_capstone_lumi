@@ -4,6 +4,7 @@ import com.lumi.ingestion.client.airflow.AirflowClient;
 import com.lumi.ingestion.dto.request.TriggerRequest;
 import com.lumi.ingestion.dto.response.TriggerResponse;
 import com.lumi.ingestion.exception.InputFileNotFoundException;
+import com.lumi.ingestion.exception.SparkSplitterException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,7 +19,9 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +35,7 @@ public class IngestionService {
     private static final String DAG_RUN_PREFIX = "lumi-";
     private static final String SPLIT_OUTPUT_PREFIX = "SPLIT_OUTPUT:";
     private static final String AIRFLOW_DATA_ROOT = "/opt/lumi/data";
+    private static final int SPARK_OUTPUT_TAIL_LINES = 40;
     private final AirflowClient airflowClient;
     private final String dagId;
     private final String jdbcUrl;
@@ -42,6 +46,7 @@ public class IngestionService {
     private final String splitOutputBase;
     private final String sparkSubmit;
     private final String pysparkScript;
+    private final String pythonExecutable;
 
     public IngestionService(
             AirflowClient airflowClient,
@@ -53,7 +58,8 @@ public class IngestionService {
             @Value("${file.split-threshold-kb}") long splitThresholdKb,
             @Value("${file.split-output-base}") String splitOutputBase,
             @Value("${file.spark-submit}") String sparkSubmit,
-            @Value("${file.pyspark-script}") String pysparkScript) {
+            @Value("${file.pyspark-script}") String pysparkScript,
+            @Value("${file.python-executable}") String pythonExecutable) {
         this.airflowClient = airflowClient;
         this.dagId = dagId;
         this.jdbcUrl = jdbcUrl;
@@ -64,6 +70,7 @@ public class IngestionService {
         this.splitOutputBase = splitOutputBase;
         this.sparkSubmit = sparkSubmit;
         this.pysparkScript = pysparkScript;
+        this.pythonExecutable = pythonExecutable;
     }
 
     public TriggerResponse trigger(TriggerRequest request) {
@@ -86,14 +93,16 @@ public class IngestionService {
         Instant sourceCreationTime = getSourceCreationTime(inputFile);
         long fileSizeBytes = getFileSize(inputFile);
         long thresholdBytes = splitThresholdKb * 1024;
-        LOG.info("Input file size checked: executionId={}, file={}, sizeBytes={}, thresholdKb={}", executionId, inputFile, fileSizeBytes, splitThresholdKb);
+        boolean splitRequired = fileSizeBytes > thresholdBytes;
+        LOG.info("File split decision: executionId={}, file={}, sizeBytes={}, thresholdBytes={}, splitRequired={}",
+            executionId, inputFile, fileSizeBytes, thresholdBytes, splitRequired);
         List<String> inputFiles;
-        if (fileSizeBytes > thresholdBytes) {
+        if (splitRequired) {
             LOG.info("File exceeds split threshold. Starting Spark splitter: executionId={}", executionId);
             Path splitDirectory = Paths.get(splitOutputBase, executionId);
             inputFiles = invokeSparkSplitter(inputFile, splitDirectory);
             if (inputFiles.isEmpty()) {
-                throw new IllegalStateException("Spark splitter produced no output files");
+            throw new SparkSplitterException("Spark exited successfully but produced no split files for " + inputFile);
             }
             LOG.info("Spark splitting completed: executionId={}, splitFiles={}", executionId, inputFiles.size());
         } else {
@@ -103,7 +112,7 @@ public class IngestionService {
 
         String dagRunId = triggerDagRun(executionId, inputFiles, recordCount, sourceCreationTime);
         LOG.info("Ingestion request accepted: executionId={}, inputFiles={}, dagRunId={}", executionId, inputFiles.size(), dagRunId);
-        return new TriggerResponse(executionId, dagRunId, inputFiles.size(), fileSizeBytes > thresholdBytes, "ACCEPTED");
+        return new TriggerResponse(executionId, dagRunId, inputFiles.size(), splitRequired, "ACCEPTED");
     }
 
     private String triggerDagRun(String executionId, List<String> inputFiles, String recordCount, Instant sourceCreationTime) {
@@ -228,6 +237,7 @@ public class IngestionService {
 
     private List<String> invokeSparkSplitter(Path inputFile, Path outputDirectory) {
         List<String> splitFiles = new ArrayList<>();
+        Deque<String> outputTail = new ArrayDeque<>();
         ProcessBuilder processBuilder = new ProcessBuilder(
                 "cmd.exe", "/c", sparkSubmit,
                 "--master", "local[*]", pysparkScript,
@@ -235,14 +245,22 @@ public class IngestionService {
                 "--output_dir", outputDirectory.toString(),
                 "--threshold_kb", String.valueOf(splitThresholdKb)
         );
+        processBuilder.environment().put("PYSPARK_PYTHON", pythonExecutable);
+        processBuilder.environment().put("PYSPARK_DRIVER_PYTHON", pythonExecutable);
 
         processBuilder.redirectErrorStream(true);
-        LOG.info("Starting Spark splitter: inputFile={}, outputDirectory={}, thresholdKb={}", inputFile, outputDirectory, splitThresholdKb);
+        LOG.info("Launching Spark splitter: command={}, pythonExecutable={}, inputFile={}, outputDirectory={}",
+                processBuilder.command(), pythonExecutable, inputFile, outputDirectory);
         try {
             Process process = processBuilder.start();
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
+                    LOG.info("Spark splitter output: {}", line);
+                    if (outputTail.size() == SPARK_OUTPUT_TAIL_LINES) {
+                        outputTail.removeFirst();
+                    }
+                    outputTail.addLast(line);
                     if (line.startsWith(SPLIT_OUTPUT_PREFIX)) {
                         String outputFile = line.substring(SPLIT_OUTPUT_PREFIX.length()).trim();
                         if (!outputFile.isBlank()) {
@@ -254,23 +272,30 @@ public class IngestionService {
                 }
             }
 
-            LOG.info("Spark submit command: {}", processBuilder.command());
             int exitCode = process.waitFor();
             if (exitCode != 0) {
-                LOG.error("Spark splitter failed: exitCode={}, inputFile={}", exitCode, inputFile);
-                throw new IllegalStateException("Spark splitter failed with exit code " + exitCode);
+                throw new SparkSplitterException("Spark splitter failed with exit code " + exitCode
+                        + " for " + inputFile + ". Recent Spark output:\n" + String.join("\n", outputTail));
             }
 
-            LOG.info("Spark splitter completed successfully: outputFiles={}", splitFiles.size());
+            for (String splitFile : splitFiles) {
+                if (!Files.isRegularFile(Paths.get(splitFile))) {
+                    throw new SparkSplitterException("Spark reported a split file that does not exist: " + splitFile
+                            + ". Recent Spark output:\n" + String.join("\n", outputTail));
+                }
+            }
+
+            LOG.info("Spark splitter completed: exitCode={}, outputFiles={}", exitCode, splitFiles.size());
             return splitFiles;
 
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             LOG.error("Spark splitter process was interrupted: {}", inputFile, ex);
-            throw new IllegalStateException("Spark splitter process was interrupted", ex);
+            throw new SparkSplitterException("Spark splitter process was interrupted for " + inputFile, ex);
         } catch (IOException ex) {
-            LOG.error("Unable to start Spark splitter: {}", sparkSubmit, ex);
-            throw new IllegalStateException("Unable to start Spark splitter", ex);
+            LOG.error("Unable to start Spark splitter: command={}", processBuilder.command(), ex);
+            throw new SparkSplitterException("Unable to start Spark splitter. Command: "
+                    + processBuilder.command() + ". Cause: " + ex.getMessage(), ex);
         }
     }
     private String getFileExtension(Path path) {
