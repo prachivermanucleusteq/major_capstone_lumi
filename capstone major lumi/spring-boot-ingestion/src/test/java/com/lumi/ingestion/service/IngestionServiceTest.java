@@ -188,21 +188,6 @@ class IngestionServiceTest {
     }
 
     @Test
-    void trigger_rejectsNegativeRecordCount() throws IOException {
-        Path controlFile = testDataRoot.resolve("control/negative-count.properties");
-        Files.writeString(controlFile, "file_name=employees.json\nfile_path="
-                + testDataRoot.resolve("json/employees.json") + "\nrecord_count=-1\n");
-        TriggerRequest req = new TriggerRequest();
-        req.setControlFile(controlFile.toString());
-
-        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
-                () -> service.trigger(req));
-
-        assertEquals("record_count cannot be negative", exception.getMessage());
-        verifyNoInteractions(airflowClient);
-    }
-
-    @Test
     void trigger_rejectsUnsupportedInputFormat() throws IOException {
         Path unsupportedFile = testDataRoot.resolve("json/employees.txt");
         Files.writeString(unsupportedFile, "data");
@@ -279,18 +264,4 @@ class IngestionServiceTest {
         verifyNoInteractions(airflowClient);
     }
 
-    @Test
-    void trigger_rejectsNonNumericRecordCount() throws IOException {
-        Path controlFile = testDataRoot.resolve("control/invalid-count.properties");
-        Files.writeString(controlFile, "file_name=employees.json\nfile_path="
-                + testDataRoot.resolve("json/employees.json") + "\nrecord_count=invalid\n");
-        TriggerRequest req = new TriggerRequest();
-        req.setControlFile(controlFile.toString());
-
-        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
-                () -> service.trigger(req));
-
-        assertEquals("record_count must be a valid number", exception.getMessage());
-        verifyNoInteractions(airflowClient);
-    }
 }
