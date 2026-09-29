@@ -7,7 +7,10 @@
 /spring-boot-ingestion/src/main/resources/application.properties
 
 .env
-data
+data/
+data/control/
+data/csv/
+
 
 ### maven build output###
 target/
