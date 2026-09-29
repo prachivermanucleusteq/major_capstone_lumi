@@ -2,18 +2,14 @@ from datetime import datetime
 import json
 import os
 import subprocess
-import csv
 from urllib.parse import urlparse
 from pathlib import Path
-from uuid import UUID
-
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import BranchPythonOperator, PythonOperator
 from airflow.utils.trigger_rule import TriggerRule
-import psycopg2
 
-BEAM_JAR = "/opt/lumi/beam/lumi-beam-pipeline.jar"
+BEAM_JAR = os.environ.get("LUMI_BEAM_JAR", "/opt/lumi/beam/lumi-beam-pipeline.jar")
 
 def _container_jdbc_url(jdbc_url):
     """Translate host-local PostgreSQL URLs to the Compose service hostname."""
@@ -36,72 +32,59 @@ with DAG(
         bash_command="""
             set -e
             echo "=== Lumi Ingestion Run ==="
-            echo "execution_id    : {{ dag_run.conf.get('execution_id', 'MISSING') }}"
-            echo "input_directory : {{ dag_run.conf.get('input_directory', 'MISSING') }}"
-            echo "file_format     : {{ dag_run.conf.get('file_format', 'MISSING') }}"
-            echo "error_output    : {{ dag_run.conf.get('error_output', 'MISSING') }}"
+            echo "execution_id : {{ dag_run.conf.get('execution_id', 'MISSING') }}"
+            echo "file_format  : {{ dag_run.conf.get('file_format', 'MISSING') }}"
+            echo "error_output : {{ dag_run.conf.get('error_output', 'MISSING') }}"
+            echo "input_files  : {{ dag_run.conf.get('input_files', 'MISSING') }}"
             [ -n "{{ dag_run.conf.get('execution_id', '') }}" ] \
                 || { echo "ERROR: execution_id missing from conf"; exit 1; }
-            [ -n "{{ dag_run.conf.get('input_directory', '') }}" ] \
-                || { echo "ERROR: input_directory missing from conf"; exit 1; }
             [ -n "{{ dag_run.conf.get('file_format', '') }}" ] \
                 || { echo "ERROR: file_format missing from conf"; exit 1; }
             [ -n "{{ dag_run.conf.get('jdbc_url', '') }}" ] \
                 || { echo "ERROR: jdbc_url missing from conf"; exit 1; }
-            [ -d "{{ dag_run.conf.get('input_directory', '') }}" ] \
-                || { echo "ERROR: input directory does not exist"; exit 1; }
-
+            [ -n "{{ dag_run.conf.get('input_files', '') }}" ] \
+                || { echo "ERROR: input_files missing from conf"; exit 1; }
             echo "Params OK"
         """,
     )
 
     def _detect_file_type(**context):
-        input_directory = context["dag_run"].conf.get("input_directory", "")
+        input_files = context["dag_run"].conf.get("input_files", [])
         file_format = context["dag_run"].conf.get("file_format", "").lower()
 
-        if not input_directory:
-            raise ValueError("input_directory is missing")
-
-        if not os.path.isdir(input_directory):
-            raise FileNotFoundError(f"Input directory does not exist: {input_directory}")
+        if not input_files:
+            raise ValueError("input_files is missing or empty")
 
         if file_format not in ("json", "csv"):
-            raise ValueError(f"Unsupported file format: {file_format} Supported formats are JSON and CSV." )
-        extension = f".{file_format}"
-        files = sorted(file for file in Path(input_directory).iterdir()
-        if file.is_file() and file.suffix.lower() == extension)
-        if not files:
-            raise FileNotFoundError( f"No {file_format.upper()} files found in: {input_directory}" )
-        empty_files = [file for file in files if file.stat().st_size == 0]
-        if empty_files:
-            raise ValueError(f"Empty {file_format.upper()} input file(s): " + ", ".join(str(file) for file in empty_files))
+            raise ValueError(f"Unsupported file format: {file_format}. Supported formats are JSON and CSV.")
+
+        files = [Path(f) for f in input_files]
+
+        missing = [f for f in files if not f.is_file()]
+        if missing:
+            raise FileNotFoundError("Input file(s) not found: " + ", ".join(str(f) for f in missing))
+
+        empty = [f for f in files if f.stat().st_size == 0]
+        if empty:
+            raise ValueError("Empty input file(s): " + ", ".join(str(f) for f in empty))
+
         print("=== Input Files ===")
-        print(f"Directory : {input_directory}")
-        print(f"Format    : {file_format.upper()}")
-        print(f"File count: {len(files)}")
-
-        for file in files:
-            print(f"File      : {file}")
-            print(f"Size      : {file.stat().st_size} bytes")
-
-        print(f"Detected file type: {file_format.upper()}")
+        print(f"Format     : {file_format.upper()}")
+        print(f"File count : {len(files)}")
+        for f in files:
+            print(f"File       : {f}")
+            print(f"Size       : {f.stat().st_size} bytes")
         return f"prepare_{file_format}"
 
-    detect_file_type = BranchPythonOperator(
-        task_id="detect_file_type",
-        python_callable=_detect_file_type,
-    )
+    detect_file_type = BranchPythonOperator( task_id="detect_file_type", python_callable=_detect_file_type,)
 
     prepare_json = BashOperator(
         task_id="prepare_json",
         bash_command="""
             set -e
-
             echo "=== JSON Processing Steps ==="
-            echo "JSON files will be processed by the Beam pipeline."
-            echo "Execution ID: {{ dag_run.conf.get('execution_id') }}"
-            echo "Input directory: {{ dag_run.conf.get('input_directory') }}"
-
+            echo "Execution ID : {{ dag_run.conf.get('execution_id') }}"
+            echo "Input files  : {{ dag_run.conf.get('input_files') }}"
             echo "JSON preparation completed."
         """,
     )
@@ -110,90 +93,54 @@ with DAG(
         task_id="prepare_csv",
         bash_command="""
             set -e
-
             echo "=== CSV Processing Steps ==="
-            echo "CSV files will be processed by the Beam pipeline."
-            echo "Execution ID: {{ dag_run.conf.get('execution_id') }}"
-            echo "Input directory: {{ dag_run.conf.get('input_directory') }}"
-
+            echo "Execution ID : {{ dag_run.conf.get('execution_id') }}"
+            echo "Input files  : {{ dag_run.conf.get('input_files') }}"
             echo "CSV preparation completed."
         """,
     )
 
     def _run_beam_pipeline(**context):
-        dag_run = context["dag_run"]
-        conf = dag_run.conf
+        conf = context["dag_run"].conf
 
         execution_id = conf.get("execution_id")
-        input_directory = conf.get("input_directory")
-        file_format = conf.get("file_format", "").lower()
+        input_files = conf.get("input_files", [])
         jdbc_url = _container_jdbc_url(conf.get("jdbc_url"))
         jdbc_username = conf.get("jdbc_username")
         jdbc_password = conf.get("jdbc_password")
         error_output_base = conf.get("error_output")
+        source_creation_time = conf.get("source_creation_time")
 
         if not execution_id:
             raise ValueError("execution_id is missing")
-
-        if not input_directory:
-            raise ValueError("input_directory is missing")
-
-        if file_format not in ("json", "csv"):
-            raise ValueError(f"Unsupported file format: {file_format}")
-
-        if not os.path.isdir(input_directory):
-            raise FileNotFoundError(
-                f"Input directory does not exist: {input_directory}"
-            )
-
-        extension = f".{file_format}"
-
-        input_files = sorted(
-            file for file in Path(input_directory).iterdir()
-            if file.is_file() and file.suffix.lower() == extension
-        )
-
         if not input_files:
-            raise FileNotFoundError(
-                f"No {file_format.upper()} files found in {input_directory}"
-            )
+            raise ValueError("input_files is missing or empty")
+        if not source_creation_time:
+            raise ValueError("source_creation_time is missing")
 
         encryption_key = os.environ.get("LUMI_ENCRYPTION_KEY", "")
-
         if len(encryption_key.encode("utf-8")) != 32:
-            raise ValueError(
-                "LUMI_ENCRYPTION_KEY must be exactly 32 bytes"
-            )
+            raise ValueError("LUMI_ENCRYPTION_KEY must be exactly 32 bytes")
 
         print("=== Starting Beam Processing ===")
         print(f"Execution ID : {execution_id}")
-        print(f"Input directory: {input_directory}")
-        print(f"File format  : {file_format.upper()}")
         print(f"File count   : {len(input_files)}")
 
-        for index, input_file in enumerate(input_files, start=1):
+        successful_database_operations = 0
+        for index, input_file_str in enumerate(input_files, start=1):
+            input_file = Path(input_file_str)
+            file_error_output = f"{error_output_base}_{input_file.stem}"
 
-            file_name = input_file.name
-            file_stem = input_file.stem
-
-            file_error_output = (
-                f"{error_output_base}_{file_stem}"
-            )
-
-            print("")
-            print("=== Processing File ===")
-            print(f"File {index}/{len(input_files)}")
+            print(f"\n=== Processing File {index}/{len(input_files)} ===")
             print(f"Input file   : {input_file}")
-            print(f"Execution ID : {execution_id}")
             print(f"Error output : {file_error_output}")
 
             command = [
-                "java",
-                "-jar",
-                BEAM_JAR,
+                "java", "-jar", BEAM_JAR,
                 "--runner=DirectRunner",
                 f"--inputFile={input_file}",
                 f"--executionId={execution_id}",
+                f"--sourceCreationTime={source_creation_time}",
                 f"--jdbcUrl={jdbc_url}",
                 f"--jdbcUsername={jdbc_username}",
                 f"--jdbcPassword={jdbc_password}",
@@ -214,20 +161,24 @@ with DAG(
                 print("=== Beam Output ===")
                 print(result.stdout.rstrip())
 
+            count_prefix = "LUMI_DB_WRITE_SUCCESS_COUNT="
+            count_lines = [line for line in result.stdout.splitlines() if line.startswith(count_prefix)]
+            if not count_lines:
+                raise RuntimeError(f"Beam did not report database operation count for {input_file.name}")
+            successful_database_operations += int(count_lines[-1][len(count_prefix):])
+
             if result.returncode != 0:
                 raise RuntimeError(
-                    f"Beam pipeline failed for file {file_name} "
+                    f"Beam pipeline failed for file {input_file.name} "
                     f"with exit code {result.returncode}"
                 )
 
-            print(
-                f"Beam processing completed successfully: {file_name}"
-            )
+            print(f"Beam processing completed successfully: {input_file.name}")
 
-        print("")
-        print("=== All Files Processed Successfully ===")
+        print(f"\n=== All Files Processed Successfully ===")
         print(f"Execution ID: {execution_id}")
         print(f"Files processed: {len(input_files)}")
+        return successful_database_operations
 
     run_beam_pipeline = PythonOperator(
         task_id="run_beam_pipeline",
@@ -236,152 +187,120 @@ with DAG(
     )
 
     def _verify_record_count(**context):
-        """Verify valid records against existing and newly inserted rows."""
+        """Compare the control-file count with successful PostgreSQL operations."""
         conf = context["dag_run"].conf
         execution_id = conf["execution_id"]
-        input_directory = Path(conf["input_directory"])
-        file_format = conf["file_format"].lower()
-        error_output_base = Path(conf["error_output"])
         try:
             expected_input_records = int(conf["expected_record_count"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
-                "expected_record_count is missing or invalid. Re-trigger this DAG "
-                "from the updated Spring Boot service or provide it in dag_run.conf."
+                "expected_record_count is missing or invalid."
             ) from exc
 
-        input_files = sorted(
-            file for file in input_directory.iterdir()
-            if file.is_file() and file.suffix.lower() == f".{file_format}"
-        )
-
-        total_input_records = 0
-        employee_ids = set()
-        for input_file in input_files:
-            if file_format == "json":
-                with input_file.open(encoding="utf-8") as source:
-                    document = json.load(source)
-                records = document if isinstance(document, list) else [document]
-                total_input_records += len(records)
-                for record in records:
-                    try:
-                        employee_ids.add(str(UUID(record.get("employee_id", ""))))
-                    except (ValueError, TypeError):
-                        pass
-            else:
-                with input_file.open(encoding="utf-8") as source:
-                    rows = list(csv.DictReader(source))
-                total_input_records += len(rows)
-                for row in rows:
-                    try:
-                        employee_ids.add(str(UUID(row.get("employee_id", "").strip())))
-                    except (ValueError, TypeError):
-                        pass
-
-        if total_input_records != expected_input_records:
-            raise RuntimeError(
-                f"Input record count mismatch: expected {expected_input_records}, "
-                f"found {total_input_records}"
-            )
-
-        error_files = sorted(error_output_base.parent.glob(f"{error_output_base.name}_*.txt"))
-        total_error_records = sum(
-            sum(1 for line in error_file.open(encoding="utf-8") if line.strip())
-            for error_file in error_files
-        )
-        expected_records = total_input_records - total_error_records
-
-        jdbc_url = _container_jdbc_url(conf["jdbc_url"])
-        parsed_url = urlparse(jdbc_url.removeprefix("jdbc:"))
-        if parsed_url.scheme != "postgresql" or not parsed_url.hostname:
-            raise ValueError(f"Unsupported PostgreSQL JDBC URL: {jdbc_url}")
-
-        with psycopg2.connect(
-            host=parsed_url.hostname,
-            port=parsed_url.port or 5432,
-            dbname=parsed_url.path.lstrip("/"),
-            user=conf["jdbc_username"],
-            password=conf["jdbc_password"],
-        ) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT COUNT(*) FROM employee WHERE employee_id = ANY(%s::uuid[])",
-                    (list(employee_ids),),
-                )
-                matching_database_records = cursor.fetchone()[0]
-                cursor.execute(
-                    "SELECT COUNT(*) FROM employee WHERE execution_id = %s",
-                    (execution_id,),
-                )
-                new_records = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*) FROM employee")
-                total_database_records = cursor.fetchone()[0]
-
-        already_existing_records = matching_database_records - new_records
-        accounted_records = already_existing_records + new_records
+        successful_database_operations = context["ti"].xcom_pull(task_ids="run_beam_pipeline")
+        if successful_database_operations is None:
+            raise RuntimeError(f"Beam database operation count is missing for execution {execution_id}")
+        record_count_difference = expected_input_records - successful_database_operations
+        not_loaded_records = max(0, record_count_difference)
 
         print("=== Record Count Verification ===")
-        print(f"Input records          : {total_input_records}")
-        print(f"Error records          : {total_error_records}")
-        print(f"Valid input records    : {expected_records}")
-        print(f"Already existing       : {already_existing_records}")
-        print(f"New records inserted   : {new_records}")
-        print(f"Total database records : {total_database_records}")
+        print(f"Execution ID             : {execution_id}")
+        print(f"Expected record count     : {expected_input_records:,}")
+        print(f"Actual record count       : {successful_database_operations:,}")
+        print(f"Not loaded records        : {not_loaded_records:,}")
 
-        if accounted_records != expected_records:
+        if successful_database_operations != expected_input_records:
             raise RuntimeError(
-                f"Record count mismatch for execution {execution_id}: "
-                f"expected {expected_records} valid records, "f"accounted for {accounted_records}"
+                "Record count mismatch. "
+                f"Expected record count: {expected_input_records}; "
+                f"Actual record count: {successful_database_operations}; "
+                f"Not loaded record count: {not_loaded_records}; "
+                f"Difference (expected - actual): {record_count_difference}; "
+                f"Execution ID: {execution_id}"
             )
 
         print("Record count verification passed.")
+        return {
+            "expected_record_count": expected_input_records,
+            "actual_record_count": successful_database_operations,
+            "record_count_difference": record_count_difference,
+            "not_loaded_records": not_loaded_records,
+            "successful_database_operations": successful_database_operations,
+        }
 
     verify_record_count = PythonOperator(
         task_id="verify_record_count",
         python_callable=_verify_record_count,
+        trigger_rule=TriggerRule.ALL_SUCCESS,
     )
 
-    check_errors = BashOperator(
+    def _check_errors(**context):
+        import glob
+        conf = context["dag_run"].conf
+        error_output_base = conf.get("error_output")
+        error_dir = str(Path(error_output_base).parent)
+        error_stem = Path(error_output_base).name
+
+        error_files = sorted(glob.glob(f"{error_dir}/{error_stem}_*.txt"))
+
+        print("=== Checking Error Files ===")
+        print(f"Error base: {error_output_base}")
+
+        if not error_files:
+            print("No error files found. All records processed successfully.")
+            return
+
+        total_errors = 0
+        for error_file in error_files:
+            count = 0
+            samples = []
+            with open(error_file, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        count += 1
+                        if len(samples) < 3:
+                            try:
+                                samples.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                samples.append({"errorReason": line.strip()})
+            total_errors += count
+            print(f"Error file       : {error_file}")
+            print(f"Error record count: {count:,}")
+            for index, sample in enumerate(samples, start=1):
+                if isinstance(sample, dict):
+                    print(f"  {index}. Reason    : {sample.get('errorReason', 'Unknown error')}")
+                else:
+                    print(f"  {index}. Reason    : {sample}")
+
+        print(f"Total error records: {total_errors:,}")
+        if total_errors > 0:
+            print(
+                f"Captured {total_errors} error record(s) under {error_dir}; "
+                "continuing because the Beam pipeline completed successfully."
+            )
+
+    check_errors = PythonOperator(
         task_id="check_errors",
-        bash_command="""
-            set -e
-            ERROR_BASE="{{ dag_run.conf.get('error_output') }}"
-            echo "=== Checking Error Files ==="
-            echo "Error base: ${ERROR_BASE}"
-            ERROR_FILES=$(find "$(dirname "${ERROR_BASE}")" \
-                -type f \
-                -name "$(basename "${ERROR_BASE}")_*.txt" \
-                2>/dev/null || true)
-            if [ -n "$ERROR_FILES" ]; then
-                TOTAL_ERRORS=0
-                while IFS= read -r ERROR_FILE; do
-                    if [ -f "$ERROR_FILE" ]; then
-                        COUNT=$(wc -l < "$ERROR_FILE")
-                        echo "Error file: $ERROR_FILE"
-                        echo "Error records: $COUNT"
-                        TOTAL_ERRORS=$((TOTAL_ERRORS + COUNT))
-                        if [ "$COUNT" -gt 0 ]; then
-                            echo "--- First 5 errors from $ERROR_FILE ---"
-                            head -n 5 "$ERROR_FILE"
-                        fi
-                    fi
-                done <<< "$ERROR_FILES"
-                echo "Total error records: $TOTAL_ERRORS"
-            else
-                echo "No error files found. All records processed successfully."
-            fi
-        """,
+        python_callable=_check_errors,
     )
 
     notify_completion = BashOperator(
         task_id="notify_completion",
         bash_command="""
+            {% set counts = ti.xcom_pull(task_ids='verify_record_count') or {} %}
             echo "=== Ingestion Run Summary ==="
-            echo "execution_id    : {{ dag_run.conf.get('execution_id') }}"
-            echo "input_directory : {{ dag_run.conf.get('input_directory') }}"
-            echo "file_format     : {{ dag_run.conf.get('file_format') }}"
-            echo "finished_at     : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-            echo "dag_run_state   : {{ dag_run.get_state() }}"
+            echo "Execution ID             : {{ dag_run.conf.get('execution_id', 'unknown') }}"
+            echo "Input files               : {{ dag_run.conf.get('input_files', []) | join(', ') }}"
+            echo "File format               : {{ dag_run.conf.get('file_format', 'unknown') }}"
+            echo "Expected record count     : {{ counts.get('expected_record_count', 'unknown') }}"
+            echo "Actual record count       : {{ counts.get('actual_record_count', 'unknown') }}"
+            echo "Not loaded records        : {{ counts.get('not_loaded_records', 'unknown') }}"
+            echo "Finished at               : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            {% if counts.get('not_loaded_records', 0) | int > 0 %}
+            echo "Completion status         : COMPLETED_WITH_ERRORS"
+            {% else %}
+            echo "Completion status         : SUCCESS"
+            {% endif %}
         """,
         trigger_rule=TriggerRule.ALL_SUCCESS,
     )
@@ -390,4 +309,4 @@ with DAG(
     detect_file_type >> prepare_csv
     prepare_json >> run_beam_pipeline
     prepare_csv >> run_beam_pipeline
-    run_beam_pipeline >> verify_record_count >> check_errors >> notify_completion
+    run_beam_pipeline >> check_errors >> verify_record_count >> notify_completion

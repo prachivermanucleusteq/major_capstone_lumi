@@ -32,6 +32,11 @@ public interface IngestionPipelineOptions extends PipelineOptions {
     String getExecutionId();
     void setExecutionId(String value);
 
+    @Description("Creation timestamp of the original source file")
+    @Validation.Required
+    String getSourceCreationTime();
+    void setSourceCreationTime(String value);
+
     @Description("File path where invalid/error records will be written")
     @Validation.Required
     String getErrorOutput();

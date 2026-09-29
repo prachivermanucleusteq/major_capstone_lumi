@@ -32,6 +32,7 @@ services:
       AIRFLOW__FAB__AUTH_BACKENDS: "airflow.providers.fab.auth_manager.api.auth.backend.basic_auth"
       AIRFLOW__API__AUTH_BACKENDS: "airflow.providers.fab.auth_manager.api.auth.backend.basic_auth"
       LUMI_ENCRYPTION_KEY: ${LUMI_ENCRYPTION_KEY}
+      LUMI_BEAM_JAR: ${LUMI_BEAM_JAR}
     command: >
       bash -c "
       airflow db migrate &&
