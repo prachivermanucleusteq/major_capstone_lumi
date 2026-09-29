@@ -24,10 +24,12 @@ public class JsonParser extends DoFn<String, EmployeeRecord> {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private final String executionId;
     private final String sourceFile;
+    private final Instant sourceCreationTime;
 
-    public JsonParser(String executionId, String sourceFile) {
+    public JsonParser(String executionId, String sourceFile, Instant sourceCreationTime) {
         this.executionId = executionId;
         this.sourceFile = sourceFile;
+        this.sourceCreationTime = sourceCreationTime;
     }
 
     @ProcessElement
@@ -69,7 +71,7 @@ public class JsonParser extends DoFn<String, EmployeeRecord> {
             record.setSkills(parseSkills(node));
             record.setAddress(parseJsonb(node, "address"));
             record.setEmergencyContact(parseJsonb(node, "emergency_contact"));
-            record.setSourceCreationTime(Instant.now());
+            record.setSourceCreationTime(sourceCreationTime);
             out.get(VALID_TAG).output(record);
 
         } catch (Exception e) {

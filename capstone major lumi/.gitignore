@@ -7,8 +7,7 @@
 /spring-boot-ingestion/src/main/resources/application.properties
 
 .env
-data/errors/
-data/split/
+data
 
 ### maven build output###
 target/

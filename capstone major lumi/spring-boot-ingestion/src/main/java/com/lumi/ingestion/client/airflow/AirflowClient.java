@@ -29,7 +29,7 @@ public class AirflowClient {
         this.airflowPassword = airflowPassword;
     }
 
-    public String triggerDagRun(String dagId, String dagRunId, Map<String, String> conf) {
+    public String triggerDagRun(String dagId, String dagRunId, Map<String, Object> conf) {
         String url = airflowBaseUrl + "/api/v1/dags/" + dagId + "/dagRuns";
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);

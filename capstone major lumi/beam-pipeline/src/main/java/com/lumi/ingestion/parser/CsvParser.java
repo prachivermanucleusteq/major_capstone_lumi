@@ -1,3 +1,5 @@
+
+
 package com.lumi.ingestion.parser;
 
 import com.lumi.ingestion.error.ErrorRecord;
@@ -17,14 +19,16 @@ import java.util.UUID;
 public class CsvParser extends DoFn<String, EmployeeRecord> {
 
     private static final Logger LOG = LoggerFactory.getLogger(CsvParser.class);
-    public static final TupleTag<EmployeeRecord> VALID_TAG = JsonParser.VALID_TAG;
-    public static final TupleTag<ErrorRecord>    ERROR_TAG = JsonParser.ERROR_TAG;
+    public static final TupleTag<EmployeeRecord> VALID_TAG = new TupleTag<>() {};
+    public static final TupleTag<ErrorRecord>    ERROR_TAG = new TupleTag<>() {};
     private final String executionId;
     private final String sourceFile;
+    private final Instant sourceCreationTime;
 
-    public CsvParser(String executionId, String sourceFile) {
+    public CsvParser(String executionId, String sourceFile, Instant sourceCreationTime) {
         this.executionId = executionId;
         this.sourceFile  = sourceFile;
+        this.sourceCreationTime = sourceCreationTime;
     }
 
     @ProcessElement
@@ -57,7 +61,7 @@ public class CsvParser extends DoFn<String, EmployeeRecord> {
             record.setSkills(          parseSkills( col(headers, values, "skills")));
             record.setAddress(         parseJsonb(  col(headers, values, "address")));
             record.setEmergencyContact(parseJsonb(  col(headers, values, "emergency_contact")));
-            record.setSourceCreationTime(Instant.now());
+            record.setSourceCreationTime(sourceCreationTime);
             out.get(VALID_TAG).output(record);
         } catch (Exception e) {
             LOG.warn("Failed to parse CSV row: {}", e.getMessage());
