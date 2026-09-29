@@ -13,6 +13,7 @@ import org.apache.beam.sdk.metrics.MetricNameFilter;
 import org.apache.beam.sdk.metrics.MetricResult;
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.metrics.MetricsFilter;
+import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Flatten;
@@ -42,6 +43,7 @@ import java.time.Instant;
 public class IngestionPipeline {
 
     private static final Logger LOG = LoggerFactory.getLogger(IngestionPipeline.class);
+    private static final Counter ERROR_RECORD_COUNTER = Metrics.counter("lumi", "error_records");
 
     public static void main(String[] args) throws IOException {
         PipelineOptionsFactory.register(IngestionPipelineOptions.class);
@@ -111,7 +113,7 @@ public class IngestionPipeline {
         PCollection<EmployeeRecord> enriched    = enrichedTuple.get(EnrichEmployeeFn.VALID_TAG);
         PCollection<ErrorRecord>    enrichErrors = enrichedTuple.get(EnrichEmployeeFn.ERROR_TAG);
 
-        // Write to PostgreSQL
+        // Write to PostgreSQL 
         PCollectionTuple writeResults = enriched
                 .apply("WriteToPostgres", ParDo
                         .of(new JdbcWriteFn(executionId,
@@ -123,7 +125,7 @@ public class IngestionPipeline {
 
         PCollection<ErrorRecord> dbErrors = writeResults.get(JdbcWriteFn.ERROR_TAG);
 
-        // Write all errors to one file
+        // Write all errors to one file 
         PCollectionList.of(toStrings(parseErrors,       "FormatParseErrors"))
                 .and(toStrings(validationErrors,  "FormatValidationErrors"))
                 .and(toStrings(enrichErrors,      "FormatEnrichErrors"))
@@ -131,8 +133,9 @@ public class IngestionPipeline {
                 .apply("FlattenErrors", Flatten.pCollections())
                 .apply("WriteErrors", TextIO.write()
                         .to(options.getErrorOutput())
-                        .withSuffix(".txt")
-                        .withNumShards(1));
+                    .withSuffix(".txt")
+                    .withOutputFilenames()
+                    .skipIfEmpty());
 
         PipelineResult result = pipeline.run();
         result.waitUntilFinish();
@@ -148,17 +151,37 @@ public class IngestionPipeline {
                 successfulDatabaseOperations += attempted;
             }
         }
+        Iterable<MetricResult<Long>> errorCounters = result.metrics().queryMetrics(
+                MetricsFilter.builder()
+                        .addNameFilter(MetricNameFilter.named("lumi", "error_records"))
+                        .build())
+                .getCounters();
+        long errorRecordCount = 0;
+        for (MetricResult<Long> counter : errorCounters) {
+            Long attempted = counter.getAttempted();
+            if (attempted != null) {
+                errorRecordCount += attempted;
+            }
+        }
         System.out.println("LUMI_DB_WRITE_SUCCESS_COUNT=" + successfulDatabaseOperations);
-        LOG.info("Pipeline completed. executionId={} | errors written to {}.txt", executionId, options.getErrorOutput());
+        if (errorRecordCount == 0) {
+            LOG.info("Pipeline completed successfully. executionId={} | records validated and loaded successfully | no errors", executionId);
+        } else {
+            LOG.warn("Pipeline completed with {} errors. executionId={} | error output directory={}",
+                    errorRecordCount, executionId, options.getErrorOutput());
+        }
     }
 
     private static PCollection<String> toStrings(PCollection<ErrorRecord> errors, String stepName) {
         return errors.apply(stepName, MapElements.via(new SimpleFunction<ErrorRecord, String>() {
-            @Override public String apply(ErrorRecord e) { return e.toString(); }
+            @Override public String apply(ErrorRecord e) {
+                ERROR_RECORD_COUNTER.inc();
+                return e.toString();
+            }
         }));
     }
 
-    // Inner DoFn: JDBC write with per-record error routing
+    // Inner DoFn: JDBC write with per-record error routing 
     static final class JdbcWriteFn extends DoFn<EmployeeRecord, Void> {
 
         static final TupleTag<Void> SUCCESS_TAG = new TupleTag<>() {};
